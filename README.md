@@ -14,7 +14,7 @@ This CLI tool, designed for retail support agents, streamlines response drafting
 
 Tick these off as you go, and commit after each one.
 
-- [ ] **1. Prepare an anonymized corpus of customer support interactions.**  
+- [x] **1. Prepare an anonymized corpus of customer support interactions.**  
       Hint: Use text preprocessing and tokenization techniques to clean and structure the data.
 - [ ] **2. Implement the n-gram model with smoothing.**  
       Hint: Implement the n-gram model and apply a smoothing technique to handle unseen sequences.

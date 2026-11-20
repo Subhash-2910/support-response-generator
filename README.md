@@ -1,6 +1,6 @@
 # Support Response Generator
 
-[![Built with askThili](https://ask.thili.ai/api/v1/public/projects/3p6ptew6ad/badge.svg)](https://ask.thili.ai/b/3p6ptew6ad)
+[![Built with askThili](https://msrit.ask.thili.ai/api/v1/public/projects/3p6ptew6ad/badge.svg)](https://msrit.ask.thili.ai/b/3p6ptew6ad)
 
 This CLI tool, designed for retail support agents, streamlines response drafting. By leveraging a next-word predictor trained on past customer interactions, it provides quick, relevant suggestions. The goal is to enhance efficiency and consistency in customer service.
 

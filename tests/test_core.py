@@ -167,7 +167,79 @@ def test_detokenize_fixes_spacing_and_capitals():
     assert core.complete("Thank you for", ["contacting", "us"]) == "Thank you for contacting us"
 
 
-# Milestone 4: Build a command-line interface for agents to get suggestions.
-@pytest.mark.skip(reason="remove this line when you start milestone 4")
-def test_milestone_4():
-    raise NotImplementedError("write the test for milestone 4")
+# --- Milestone 4: Build a command-line interface for agents to get suggestions.
+
+from app import cli  # noqa: E402
+
+
+@pytest.fixture
+def corpus(tmp_path):
+    """A small prepared corpus in a temporary folder, so tests never touch the real one."""
+    raw = tmp_path / "raw.txt"
+    raw.write_text(RAW + "".join(
+        f"\n### Ticket {i} | refund\nCustomer: Where is my refund?\nAgent: Hi Sam, thank you for contacting us. "
+        f"Your refund has been processed. Thanks, Alex\n" for i in range(3, 8)))
+    core.prepare_corpus(raw, tmp_path)
+    return tmp_path
+
+
+def test_cli_next_shows_ranked_words(corpus, capsys):
+    cli.main(["next", "thank", "you", "for", "--top", "2", "--corpus", str(corpus)])
+    out = capsys.readouterr().out
+    assert 'Next word after "thank you for"' in out and "1. contacting" in out
+
+
+def test_cli_suggest_shows_full_continuations(corpus, capsys):
+    cli.main(["suggest", "Your refund has", "--corpus", str(corpus), "--n", "3"])
+    out = capsys.readouterr().out
+    assert "1. Your refund has been processed." in out
+
+
+def test_cli_suggest_with_no_text_suggests_an_opening(corpus, capsys):
+    cli.main(["suggest", "--corpus", str(corpus), "--top", "1"])
+    assert "1. Hi <NAME>, thank you for contacting us." in capsys.readouterr().out
+
+
+def test_cli_add_anonymizes_and_the_model_learns_it(corpus, capsys):
+    cli.main(["add", "Hi Priya, your parcel is waiting at the depot. Call 555-123-4567.", "--corpus", str(corpus)])
+    assert "Hi <NAME>, your parcel is waiting at the depot. Call <PHONE>." in capsys.readouterr().out
+    model = core.build_model(corpus, n=3)
+    assert core.suggest_next_words(model, "your parcel is", top_n=1)[0][0] == "waiting"
+
+
+def test_cli_add_rejects_an_empty_response(corpus):
+    with pytest.raises(SystemExit):
+        cli.main(["add", "  ...  ", "--corpus", str(corpus)])
+
+
+def test_cli_without_a_prepared_corpus_explains_what_to_do(tmp_path):
+    with pytest.raises(SystemExit) as err:
+        cli.main(["next", "hello", "--corpus", str(tmp_path)])
+    assert "prepare" in str(err.value)
+
+
+def test_interactive_drafting_with_numbers_continuations_and_undo(corpus):
+    model = core.build_model(corpus, n=3)
+    inputs = iter(["1", "", "/undo", "c1", "We hope that helps!", "/done"])
+    lines = []
+    draft = cli.run_interactive(model, corpus_dir=str(corpus), read=lambda _: next(inputs), write=lines.append)
+    assert draft == "Hi <NAME>, thank you for contacting us. We hope that helps!"
+    assert "Final response:" in lines and any("fill in: <NAME>" in line for line in lines)
+
+
+def test_interactive_save_adds_the_draft_and_rebuilds(corpus):
+    model = core.build_model(corpus, n=3)
+    inputs = iter(["Our store opens at nine.", "/save", "/done"])
+    rebuilt = []
+    cli.run_interactive(model, corpus_dir=str(corpus), read=lambda _: next(inputs), write=lambda _: None,
+                        rebuild=lambda: rebuilt.append(1) or core.build_model(corpus, n=3))
+    assert (corpus / core.CONTRIBUTED_FILE).read_text() == "Our store opens at nine.\n" and rebuilt
+
+
+def test_interactive_ends_cleanly_on_end_of_input(corpus):
+    model = core.build_model(corpus, n=3)
+
+    def read(_):
+        raise EOFError
+
+    assert cli.run_interactive(model, corpus_dir=str(corpus), read=read, write=lambda _: None) == ""

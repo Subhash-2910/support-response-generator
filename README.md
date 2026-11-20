@@ -20,31 +20,117 @@ Tick these off as you go, and commit after each one.
       Hint: Implement the n-gram model and apply a smoothing technique to handle unseen sequences.
 - [x] **3. Create a text generation function to suggest response continuations.**  
       Hint: Develop a function that uses your n-gram model to iteratively predict and suggest the most probable next words.
-- [ ] **4. Build a command-line interface for agents to get suggestions.**  
+- [x] **4. Build a command-line interface for agents to get suggestions.**  
       Hint: Create a user-friendly command-line interface to input partial responses and display generated suggestions.
 
 ## Run it
 
-You need Python 3.12 and git.
+The predictor uses only the Python standard library (no AI service, no API key). You need Python 3.12, or Docker.
+
+**With Docker**
+
+```bash
+docker build -t support-response-generator .
+docker run --rm support-response-generator suggest "Hi Sarah, thank you for"
+docker run --rm -it -v "$PWD/corpus:/app/corpus" support-response-generator interactive   # -v keeps what you /save
+docker run --rm --entrypoint pytest support-response-generator -q                          # run the tests
+```
+
+**With Python**
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # then choose a model; see the comments inside
-python -m app.cli hello
+python -m app.cli --help
 pytest
 ```
 
-Your work goes in `app/core.py` (one stub per milestone) and `tests/test_core.py`. The first tests pass already; they
-check the plumbing.
+### Commands
+
+| Command | What it does |
+|---|---|
+| `prepare` | Anonymize and clean `corpus/raw_interactions.txt` into `corpus/agent_responses.txt` and `corpus/customer_messages.txt` |
+| `next "thank you for" --top 5` | The top-N next words, with probabilities |
+| `suggest "I have issued a full" --top 3` | Complete continuations (beam search), with placeholders to fill in |
+| `interactive` | Draft a response step by step: pick a word by number, a continuation with `c1`-`c3` (Enter = `c1`), or type your own words; `/undo`, `/clear`, `/save`, `/done` |
+| `add "Your parcel is on its way."` | Add a good response to `corpus/contributed.txt` (anonymized first); the model learns it on the next run |
+| `evaluate` | Compare n-gram orders and smoothing techniques on held-out responses |
+
+`next`, `suggest` and `interactive` take `--n` (order, default 4) and `--smoothing` (`add_k`, `interpolate`, `kneser_ney`).
+
+```text
+$ python -m app.cli next "Hi Sarah, thank you for"
+Next word after "Hi Sarah, thank you for":
+  1. your              36.3%
+  2. contacting        30.7%
+  3. reaching          16.6%
+  4. shopping          16.1%
+
+$ python -m app.cli suggest "Your order"
+  1. Your order <ORDER_ID> has already been shipped, so we cannot change the address.  (fill in: <ORDER_ID>)
+  2. Your order <ORDER_ID>.  (fill in: <ORDER_ID>)
+  3. Your order <ORDER_ID> has already been shipped, so we cannot cancel it.  (fill in: <ORDER_ID>)
+```
+
+## How it works
+
+1. **Corpus** (`app/core.py`, Milestone 1). `scripts/generate_raw_corpus.py` writes 600 synthetic retail tickets
+   (orders, refunds, returns, damaged or wrong items, cancellations, address changes, payments, accounts, discount
+   codes, stock). **Every personal detail in it is invented**, and it is there on purpose so the anonymizer has
+   something to remove. The anonymizer replaces emails, URLs, addresses, card numbers, tracking numbers, phone
+   numbers, order IDs and long numbers with placeholders (`<EMAIL>`, `<ORDER_ID>`, ...). Names are found next to
+   cues ("Hi Sarah", "my name is ...", "Thanks, Alex") and then removed everywhere in the corpus, including surnames
+   that follow a removed first name. Text is normalized (Unicode, quotes, whitespace) and tokenized into lower-case
+   words, numbers and punctuation; placeholders stay as single tokens.
+2. **Model** (Milestone 2). `NGramModel` counts every context of up to n-1 words, with `<s>` padding, an end token
+   `</s>` and `<unk>` for rare words. Three smoothing techniques give unseen sequences a small probability while keeping
+   each distribution summing to 1: **add-k** (Laplace when k=1), **linear interpolation** with lower orders, and
+   **interpolated Kneser-Ney** (absolute discounting with continuation counts).
+3. **Generation** (Milestone 3). The agent's partial text is anonymized and tokenized like the corpus. The model then
+   gives the top-N next words, a greedy continuation (stops at the end of a sentence and blocks repeated phrases), or
+   beam search for several distinct, high-probability continuations. Tokens are turned back into readable text with
+   proper spacing and capitals.
+4. **CLI** (Milestone 4). `app/cli.py`. The model trains from the corpus on each run, in well under a second.
+
+### Results
+
+Held-out evaluation (`python -m app.cli evaluate`, 80/20 split of the 600 agent responses). Top-k is the share of
+positions where the real next word is among the model's k best guesses.
+
+| n | Smoothing | Perplexity | Top-1 | Top-3 | Top-5 |
+|---|---|---:|---:|---:|---:|
+| 2 | add-k | 4.59 | 51.9% | 77.7% | 86.5% |
+| 2 | interpolation | 5.15 | 51.9% | 77.8% | 86.3% |
+| 2 | Kneser-Ney | 3.80 | 51.9% | 77.8% | 86.5% |
+| 3 | add-k | 2.59 | 79.2% | 95.1% | 98.0% |
+| 3 | interpolation | 1.96 | 79.2% | 95.2% | 97.9% |
+| 3 | Kneser-Ney | 1.64 | 79.3% | 95.2% | 98.2% |
+| 4 | add-k | 2.75 | 84.3% | 95.5% | 97.9% |
+| 4 | interpolation | 1.54 | 84.6% | 96.2% | 98.6% |
+| 4 | **Kneser-Ney** | **1.44** | **84.9%** | **96.2%** | **98.8%** |
+
+- Kneser-Ney has the lowest perplexity at every order, so it is the default (with n=4).
+- Add-k gets *worse* going from n=3 to n=4: with only the full-order context and no backoff, more of its contexts are
+  rare, and it spreads their probability over the whole vocabulary. Interpolation and Kneser-Ney fall back on shorter
+  contexts and keep improving.
+- The numbers are high because the synthetic corpus is built from a limited set of phrasings. On real tickets, expect
+  higher perplexity and lower accuracy.
+
+### Using your own tickets
+
+Put them in `corpus/raw_interactions.txt` in the same format (`### Ticket <id> | <intent>`, then `Customer: ...` and
+`Agent: ...` lines), and run `python -m app.cli prepare`. Check the prepared files before you commit them: the
+anonymizer is rule-based, so a name with no greeting or sign-off cue next to it can slip through.
 
 ## Settings and secrets
 
-Model settings live in `.env`, which is ignored by git. **Never commit `.env` or paste a key into code.** If a key ever
-reaches GitHub, treat it as leaked and make a new one.
+The predictor needs no settings or keys. `app/llm.py` (an optional chat-model helper from the starter) is not used. If
+you ever use it, its settings live in `.env`, which is ignored by git. **Never commit `.env` or paste a key into code.**
+If a key ever reaches GitHub, treat it as leaked and make a new one. `CORPUS_DIR` (default `corpus`) sets where the
+CLI looks for the corpus.
 
 ## Stretch ideas
 
-- Allow agents to choose from the top N suggested words instead of just the single best one.
-- Explore and implement different smoothing techniques to potentially improve prediction accuracy.
-- Add a feature for agents to easily contribute new, effective responses to the corpus, enabling the model to learn and adapt over time.
+- [x] Allow agents to choose from the top N suggested words instead of just the single best one (`next --top N`, and numbers in `interactive`).
+- [x] Explore and implement different smoothing techniques to potentially improve prediction accuracy (add-k, interpolation, Kneser-Ney; compare with `evaluate`).
+- [x] Add a feature for agents to easily contribute new, effective responses to the corpus, enabling the model to learn and adapt over time (`add`, and `/save` in `interactive`).

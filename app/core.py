@@ -415,3 +415,30 @@ def detokenize(tokens: list[str], before: str = "") -> str:
 def complete(text: str, tokens: list[str]) -> str:
     """The agent's text followed by the suggested tokens."""
     return text.rstrip() + detokenize(tokens, before=text)
+
+
+# =====================================================================================================================
+# --- Milestone 4: Build a command-line interface for agents to get suggestions.
+# The CLI itself is app/cli.py. These helpers give it a trained model and let agents grow the corpus.
+# =====================================================================================================================
+
+def build_model(corpus_dir: str | Path = "corpus", n: int = 4, smoothing: str = "kneser_ney") -> NGramModel:
+    """Train on the prepared corpus plus contributed responses. Training takes well under a second."""
+    return NGramModel(n=n, smoothing=smoothing).fit(load_sequences(corpus_dir))
+
+
+def add_response(text: str, corpus_dir: str | Path = "corpus") -> str:
+    """Anonymize a good response and append it to the contributed corpus, so the next model learns from it."""
+    clean = normalize(anonymize(normalize(text)))
+    if not any(t in PLACEHOLDERS or t[0].isalnum() for t in tokenize(clean)):
+        raise ValueError("the response has no words in it")
+    path = Path(corpus_dir) / CONTRIBUTED_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(clean + "\n")
+    return clean
+
+
+def placeholders_in(text: str) -> list[str]:
+    """Placeholders the agent still has to fill in, in order of first appearance."""
+    return list(dict.fromkeys(re.findall(r"<[A-Z_]+>", text)))

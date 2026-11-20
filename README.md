@@ -16,7 +16,7 @@ Tick these off as you go, and commit after each one.
 
 - [x] **1. Prepare an anonymized corpus of customer support interactions.**  
       Hint: Use text preprocessing and tokenization techniques to clean and structure the data.
-- [ ] **2. Implement the n-gram model with smoothing.**  
+- [x] **2. Implement the n-gram model with smoothing.**  
       Hint: Implement the n-gram model and apply a smoothing technique to handle unseen sequences.
 - [ ] **3. Create a text generation function to suggest response continuations.**  
       Hint: Develop a function that uses your n-gram model to iteratively predict and suggest the most probable next words.

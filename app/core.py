@@ -152,3 +152,152 @@ def load_sequences(corpus_dir: str | Path = "corpus", include_customers: bool = 
         if path.exists():
             sequences += [tokenize(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     return [s for s in sequences if s]
+
+
+# =====================================================================================================================
+# --- Milestone 2: Implement the n-gram model with smoothing.
+# Count which word follows each context of n-1 words. Smoothing gives unseen sequences a small, non-zero probability:
+#   add_k        (c(ctx, w) + k) / (c(ctx) + k|V|)                       k = 1 is Laplace smoothing
+#   interpolate  lambda * P_ML(w | ctx) + (1 - lambda) * P(w | shorter ctx), down to an add-k unigram
+#   kneser_ney   interpolated Kneser-Ney: absolute discounting, with continuation counts for the lower orders
+# =====================================================================================================================
+
+BOS, EOS, UNK = "<s>", "</s>", "<unk>"
+SMOOTHINGS = ("add_k", "interpolate", "kneser_ney")
+
+
+class NGramModel:
+    def __init__(self, n: int = 4, smoothing: str = "kneser_ney", k: float = 0.1, lam: float = 0.7,
+                 discount: float = 0.75, min_count: int = 1):
+        if n < 1:
+            raise ValueError("n must be at least 1")
+        if smoothing not in SMOOTHINGS:
+            raise ValueError(f"smoothing must be one of {SMOOTHINGS}")
+        self.n, self.smoothing, self.k, self.lam, self.discount, self.min_count = n, smoothing, k, lam, discount, min_count
+
+    # --- training
+    def fit(self, sequences: list[list[str]]) -> "NGramModel":
+        word_counts: dict[str, int] = {}
+        for seq in sequences:
+            for w in seq:
+                word_counts[w] = word_counts.get(w, 0) + 1
+        self.vocab = sorted(w for w, c in word_counts.items() if c >= self.min_count) + [EOS, UNK]
+        self._known = set(self.vocab)
+        # counts[j][context of j words] = {next word: count}
+        self.counts: list[dict[tuple, dict[str, int]]] = [{} for _ in range(self.n)]
+        for seq in sequences:
+            padded = [BOS] * (self.n - 1) + [self._map(w) for w in seq] + [EOS]
+            for i in range(self.n - 1, len(padded)):
+                word = padded[i]
+                for j in range(self.n):
+                    table = self.counts[j].setdefault(tuple(padded[i - j:i]), {})
+                    table[word] = table.get(word, 0) + 1
+        # Kneser-Ney continuation counts: in how many distinct contexts does `w` follow this shorter context?
+        self.continuation: list[dict[tuple, dict[str, int]]] = [{} for _ in range(self.n)]
+        for j in range(self.n - 1):
+            for ctx, followers in self.counts[j + 1].items():
+                table = self.continuation[j].setdefault(ctx[1:], {})
+                for w in followers:
+                    table[w] = table.get(w, 0) + 1
+        self.totals = [{ctx: sum(c.values()) for ctx, c in level.items()} for level in self.counts]
+        self.cont_totals = [{ctx: sum(c.values()) for ctx, c in level.items()} for level in self.continuation]
+        return self
+
+    def _map(self, word: str) -> str:
+        return word if word in self._known else UNK
+
+    def context_of(self, history: list[str]) -> tuple:
+        """The last n-1 tokens, mapped into the vocabulary and padded on the left with <s>."""
+        if self.n == 1:
+            return ()
+        padded = [BOS] * (self.n - 1) + [self._map(w) for w in history]
+        return tuple(padded[-(self.n - 1):])
+
+    # --- probabilities
+    def prob(self, word: str, history: list[str] | tuple = ()) -> float:
+        """P(word | the last n-1 words of history), smoothed. Never 0 for a word in the vocabulary."""
+        return self._prob(self._map(word), self.context_of(list(history)))
+
+    def _prob(self, w: str, ctx: tuple) -> float:
+        V = len(self.vocab)
+        if self.smoothing == "add_k":
+            c = self.counts[self.n - 1].get(ctx, {})
+            return (c.get(w, 0) + self.k) / (self.totals[self.n - 1].get(ctx, 0) + self.k * V)
+        if self.smoothing == "interpolate":
+            p = (self.counts[0][()].get(w, 0) + self.k) / (self.totals[0][()] + self.k * V)
+            for j in range(1, self.n):
+                sub = ctx[len(ctx) - j:]
+                total = self.totals[j].get(sub, 0)
+                if total:  # an unseen context gives no evidence, so all weight stays on the shorter context
+                    p = self.lam * self.counts[j][sub].get(w, 0) / total + (1 - self.lam) * p
+            return p
+        # Kneser-Ney: the lowest order spreads the discounted mass uniformly, so unseen words keep some probability.
+        d = self.discount
+        table0, total0 = (self.continuation[0], self.cont_totals[0]) if self.n > 1 else (self.counts[0], self.totals[0])
+        c0, t0 = table0.get((), {}), total0.get((), 0)
+        p = (max(c0.get(w, 0) - d, 0) + d * len(c0) / V) / t0 if t0 else 1 / V
+        for j in range(1, self.n):
+            sub = ctx[len(ctx) - j:]
+            table, totals = (self.counts, self.totals) if j == self.n - 1 else (self.continuation, self.cont_totals)
+            c, total = table[j].get(sub), totals[j].get(sub, 0)
+            if total:
+                p = (max(c.get(w, 0) - d, 0) + d * len(c) * p) / total
+        return p
+
+    def distribution(self, history: list[str] | tuple = ()) -> dict[str, float]:
+        """P(w | history) for every word in the vocabulary (sums to 1)."""
+        ctx = self.context_of(list(history))
+        return {w: self._prob(w, ctx) for w in self.vocab}
+
+    def top_next(self, history: list[str] | tuple = (), k: int = 5, exclude=(UNK,)) -> list[tuple[str, float]]:
+        dist = self.distribution(history)
+        ranked = sorted(((w, p) for w, p in dist.items() if w not in exclude), key=lambda wp: (-wp[1], wp[0]))
+        return ranked[:k]
+
+    # --- evaluation
+    def perplexity(self, sequences: list[list[str]]) -> float:
+        """2 ** (average negative log2 probability per token, counting the end-of-response token). Lower is better."""
+        import math
+        log_sum, count = 0.0, 0
+        for seq in sequences:
+            history: list[str] = []
+            for w in list(seq) + [EOS]:
+                log_sum -= math.log2(self.prob(w, history))
+                count += 1
+                history.append(w)
+        return 2 ** (log_sum / count) if count else float("inf")
+
+
+def train_test_split(sequences: list, test_fraction: float = 0.2, seed: int = 0) -> tuple[list, list]:
+    """The same shuffled split for the same seed."""
+    import random
+    order = list(range(len(sequences)))
+    random.Random(seed).shuffle(order)
+    n_test = max(1, int(round(test_fraction * len(sequences))))
+    test = set(order[:n_test])
+    return [s for i, s in enumerate(sequences) if i not in test], [s for i, s in enumerate(sequences) if i in test]
+
+
+def next_word_accuracy(model: NGramModel, sequences: list[list[str]], ks=(1, 3, 5)) -> dict:
+    """Share of positions where the true next word is among the model's top-k guesses."""
+    hits, total = {k: 0 for k in ks}, 0
+    for seq in sequences:
+        for i, word in enumerate(list(seq) + [EOS]):
+            guesses = [w for w, _ in model.top_next(seq[:i], k=max(ks))]
+            total += 1
+            for k in ks:
+                hits[k] += word in guesses[:k]
+    return {f"top{k}": hits[k] / total for k in ks} | {"positions": total}
+
+
+def evaluate_models(sequences: list[list[str]], orders=(1, 2, 3, 4), smoothings=SMOOTHINGS,
+                    test_fraction: float = 0.2, seed: int = 0) -> list[dict]:
+    """Train every (order, smoothing) pair on the same split; report held-out perplexity and next-word accuracy."""
+    train, test = train_test_split(sequences, test_fraction, seed)
+    rows = []
+    for n in orders:
+        for smoothing in smoothings:
+            model = NGramModel(n=n, smoothing=smoothing).fit(train)
+            rows.append({"n": n, "smoothing": smoothing, "perplexity": model.perplexity(test),
+                         **next_word_accuracy(model, test)})
+    return rows

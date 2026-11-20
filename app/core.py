@@ -301,3 +301,117 @@ def evaluate_models(sequences: list[list[str]], orders=(1, 2, 3, 4), smoothings=
             rows.append({"n": n, "smoothing": smoothing, "perplexity": model.perplexity(test),
                          **next_word_accuracy(model, test)})
     return rows
+
+
+# =====================================================================================================================
+# --- Milestone 3: Create a text generation function to suggest response continuations.
+# The agent's partial response is anonymized and tokenized the same way as the corpus, then the model predicts
+# word by word: greedily (always the most likely word) or with beam search (several good alternatives).
+# =====================================================================================================================
+
+SENTENCE_END = {".", "!", "?"}
+_NO_SPACE_BEFORE = {".", ",", "!", "?", ";", ":", "%"}
+_NO_SPACE_AFTER = {"$"}
+
+
+def history_from_text(text: str) -> list[str]:
+    """What the agent has typed so far, as model tokens ('Hi Sarah,' -> ['hi', '<NAME>', ','])."""
+    return tokenize(anonymize(normalize(text)))
+
+
+def suggest_next_words(model: NGramModel, text: str, top_n: int = 5,
+                       min_prob: float = 0.01) -> list[tuple[str, float]]:
+    """The top-N most probable next words after the partial response, with their probabilities.
+    Words below `min_prob` are left out (smoothing gives every word a little probability), unless nothing is left."""
+    ranked = model.top_next(history_from_text(text), k=top_n, exclude=(UNK, EOS))
+    return [wp for wp in ranked if wp[1] >= min_prob] or ranked
+
+
+def _repeats(tokens: list[str], size: int) -> bool:
+    """True if the last `size` tokens already appeared earlier as a group (a sign of a generation loop)."""
+    if size < 1 or len(tokens) < size + 1:
+        return False
+    tail = tuple(tokens[-size:])
+    return any(tuple(tokens[i:i + size]) == tail for i in range(len(tokens) - size))
+
+
+def generate(model: NGramModel, text: str, max_words: int = 20, stop_at_sentence_end: bool = True,
+             no_repeat: int = 3) -> list[str]:
+    """Greedy continuation: repeatedly append the most probable next word.
+    Stops at the end of the response, at the end of a sentence (optional) or after `max_words` tokens.
+    A word that would repeat an earlier group of `no_repeat` tokens is skipped in favour of the next best one."""
+    history, out = history_from_text(text), []
+    while len(out) < max_words:
+        for word, _ in model.top_next(history + out, k=10, exclude=(UNK,)):
+            if not _repeats(history + out + [word], no_repeat):
+                break
+        else:
+            break
+        if word == EOS:
+            break
+        out.append(word)
+        if stop_at_sentence_end and word in SENTENCE_END:
+            break
+    return out
+
+
+def suggest_continuations(model: NGramModel, text: str, n: int = 3, max_words: int = 20, beam_width: int = 8,
+                          stop_at_sentence_end: bool = True, no_repeat: int = 3, length_penalty: float = 0.3,
+                          min_prob: float = 0.01) -> list[tuple[list[str], float]]:
+    """Beam search for the `n` most probable distinct continuations. Returns (tokens, probability) pairs.
+    Continuations that end a sentence (or the response) rank above ones cut off at `max_words`; within each group,
+    the log-probability is divided by length ** length_penalty, so short endings are not always preferred.
+    Words below `min_prob` are not expanded: they exist only because of smoothing and make poor suggestions."""
+    import math
+    history = history_from_text(text)
+    beams = [([], 0.0)]
+    finished: list[tuple[list[str], float, bool]] = []
+    while beams:
+        candidates = []
+        for tokens, logp in beams:
+            for word, p in model.top_next(history + tokens, k=beam_width, exclude=(UNK,)):
+                if p < min_prob or _repeats(history + tokens + [word], no_repeat):
+                    continue
+                if word == EOS:
+                    if tokens:
+                        finished.append((tokens, logp + math.log(p), True))
+                    continue
+                new = (tokens + [word], logp + math.log(p))
+                ended = stop_at_sentence_end and word in SENTENCE_END
+                if ended or len(new[0]) >= max_words:
+                    finished.append(new + (ended,))
+                else:
+                    candidates.append(new)
+        candidates.sort(key=lambda c: c[1] / len(c[0]) ** length_penalty, reverse=True)
+        beams = candidates[:beam_width]
+    finished.sort(key=lambda c: (c[2], c[1] / len(c[0]) ** length_penalty), reverse=True)
+    out, seen = [], set()
+    for tokens, logp, _ in finished:
+        if tuple(tokens) not in seen:
+            seen.add(tuple(tokens))
+            out.append((tokens, math.exp(logp)))
+        if len(out) == n:
+            break
+    return out
+
+
+def detokenize(tokens: list[str], before: str = "") -> str:
+    """Turn tokens back into readable text that continues `before`: spacing around punctuation, 'I', and
+    a capital letter at the start of each sentence. Returns only the new part (with its leading space)."""
+    out, prev = "", before.rstrip()
+    sentence_start = not prev or prev[-1] in SENTENCE_END
+    for tok in tokens:
+        word = tok
+        if word == "i" or word.startswith("i'"):
+            word = "I" + word[1:]
+        if sentence_start and word[:1].isalpha():
+            word = word[0].upper() + word[1:]
+        space = "" if (not prev and not out) or tok in _NO_SPACE_BEFORE or (out or prev)[-1:] in _NO_SPACE_AFTER else " "
+        out += space + word
+        sentence_start = tok in SENTENCE_END
+    return out
+
+
+def complete(text: str, tokens: list[str]) -> str:
+    """The agent's text followed by the suggested tokens."""
+    return text.rstrip() + detokenize(tokens, before=text)

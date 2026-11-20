@@ -114,10 +114,57 @@ def test_higher_order_models_fit_the_support_corpus_better():
     assert trigram < unigram / 5
 
 
-# Milestone 3: Create a text generation function to suggest response continuations.
-@pytest.mark.skip(reason="remove this line when you start milestone 3")
-def test_milestone_3():
-    raise NotImplementedError("write the test for milestone 3")
+# --- Milestone 3: Create a text generation function to suggest response continuations.
+
+@pytest.fixture(scope="module")
+def model():
+    return core.NGramModel(n=4).fit(core.load_sequences())
+
+
+def test_next_word_suggestions_are_ranked_and_probable(model):
+    words = core.suggest_next_words(model, "Hi Sarah, thank you for", top_n=3)
+    assert len(words) == 3
+    assert [w for w, _ in words][:2] == ["your", "contacting"]
+    assert words[0][1] >= words[1][1] >= words[2][1] > 0
+    assert all(w not in (core.UNK, core.EOS) for w, _ in words)
+
+
+def test_partial_text_is_anonymized_before_predicting():
+    assert core.history_from_text("Hi Sarah,") == ["hi", "<NAME>", ","]
+
+
+def test_greedy_generation_completes_a_sentence(model):
+    tokens = core.generate(model, "I have issued a full")
+    assert tokens[0] == "refund" and tokens[-1] in core.SENTENCE_END
+    assert core.complete("I have issued a full", tokens).startswith("I have issued a full refund")
+
+
+def test_greedy_generation_respects_max_words_and_avoids_loops(model):
+    tokens = core.generate(model, "", max_words=40, stop_at_sentence_end=False)
+    assert 0 < len(tokens) <= 40
+    assert not any(core._repeats(tokens[: i + 1], 3) for i in range(len(tokens)))
+
+
+def test_beam_search_gives_distinct_ranked_alternatives(model):
+    alternatives = core.suggest_continuations(model, "we will send", n=3)
+    assert len(alternatives) == 3
+    texts = [core.detokenize(tokens, "we will send") for tokens, _ in alternatives]
+    assert len(set(texts)) == 3
+    assert all(t.startswith(" you") and t.endswith(".") for t in texts)
+
+
+def test_beam_search_works_on_a_tiny_model():
+    tiny = core.NGramModel(n=3).fit(TOY)
+    alternatives = core.suggest_continuations(tiny, "thank you for", n=3)
+    texts = [core.detokenize(tokens, "thank you for") for tokens, _ in alternatives]
+    assert " contacting us." in texts and " your patience." in texts
+
+
+def test_detokenize_fixes_spacing_and_capitals():
+    tokens = ["hi", "<NAME>", ",", "i'm", "sorry", ".", "your", "refund", "is", "ready", "!"]
+    assert core.detokenize(tokens) == "Hi <NAME>, I'm sorry. Your refund is ready!"
+    assert core.complete("Thank you.", ["we", "will", "help", "."]) == "Thank you. We will help."
+    assert core.complete("Thank you for", ["contacting", "us"]) == "Thank you for contacting us"
 
 
 # Milestone 4: Build a command-line interface for agents to get suggestions.

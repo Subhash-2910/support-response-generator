@@ -18,7 +18,7 @@ Tick these off as you go, and commit after each one.
       Hint: Use text preprocessing and tokenization techniques to clean and structure the data.
 - [x] **2. Implement the n-gram model with smoothing.**  
       Hint: Implement the n-gram model and apply a smoothing technique to handle unseen sequences.
-- [ ] **3. Create a text generation function to suggest response continuations.**  
+- [x] **3. Create a text generation function to suggest response continuations.**  
       Hint: Develop a function that uses your n-gram model to iteratively predict and suggest the most probable next words.
 - [ ] **4. Build a command-line interface for agents to get suggestions.**  
       Hint: Create a user-friendly command-line interface to input partial responses and display generated suggestions.

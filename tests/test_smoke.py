@@ -1,28 +1,24 @@
-"""These pass on day one. They check the plumbing so you notice quickly if you break it."""
-import os
+"""Quick checks that the command line is wired up and the whole pipeline runs from the raw tickets."""
+import pytest
 
-from app import llm
-from app.storage import Store
-
-
-def test_the_store_keeps_what_you_put_in_it(tmp_path):
-    store = Store(str(tmp_path / "app.json"))
-    store.put("hello", {"n": 1})
-    assert store.get("hello") == {"n": 1}
-    assert store.get("missing", "fallback") == "fallback"
-    assert store.all() == {"hello": {"n": 1}}
+from app import cli
 
 
-def test_model_settings_default_to_a_local_ollama(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)                  # no .env here
-    for name in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"):
-        monkeypatch.delenv(name, raising=False)
-    base, key, model = llm.settings()
-    assert base == "http://localhost:11434/v1" and key == "" and model == ""
+def test_help_lists_every_command(capsys):
+    with pytest.raises(SystemExit) as err:
+        cli.main(["--help"])
+    assert err.value.code == 0
+    out = capsys.readouterr().out
+    for command in ["prepare", "next", "suggest", "interactive", "add", "evaluate", "report"]:
+        assert command in out
 
 
-def test_the_command_line_runs(capsys):
-    from app.cli import main
-    main(["hello"])
-    assert "is ready" in capsys.readouterr().out
-
+def test_report_reruns_the_pipeline_and_writes_results(tmp_path, capsys):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "raw_interactions.txt").write_text(open("corpus/raw_interactions.txt").read())
+    cli.main(["report", "--corpus", str(corpus), "--out", str(tmp_path / "results")])
+    evaluation = (tmp_path / "results" / "evaluation.md").read_text()
+    assert "baseline" in evaluation and "Kneser-Ney" in evaluation
+    assert "Hi <NAME>" in (tmp_path / "results" / "sample_suggestions.md").read_text()
+    assert (corpus / "agent_responses.txt").exists()

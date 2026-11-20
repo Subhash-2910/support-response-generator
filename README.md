@@ -25,7 +25,18 @@ Tick these off as you go, and commit after each one.
 
 ## Run it
 
-The predictor uses only the Python standard library (no AI service, no API key). You need Python 3.12, or Docker.
+The predictor uses only the Python standard library (no AI service, no API key, no download). The data is in the repo
+(`corpus/raw_interactions.txt`). You need Docker, or Python 3.12.
+
+**Reproduce everything in one command.** This prepares the corpus from the raw tickets, evaluates every model against
+the baseline and writes [results/evaluation.md](results/evaluation.md) and
+[results/sample_suggestions.md](results/sample_suggestions.md):
+
+```bash
+docker build -t support-response-generator . && docker run --rm -v "$PWD/results:/app/results" support-response-generator report
+```
+
+or, without Docker, `python -m app.cli report`.
 
 **With Docker**
 
@@ -55,6 +66,7 @@ pytest
 | `interactive` | Draft a response step by step: pick a word by number, a continuation with `c1`-`c3` (Enter = `c1`), or type your own words; `/undo`, `/clear`, `/save`, `/done` |
 | `add "Your parcel is on its way."` | Add a good response to `corpus/contributed.txt` (anonymized first); the model learns it on the next run |
 | `evaluate` | Compare n-gram orders and smoothing techniques on held-out responses |
+| `report` | Run the whole pipeline (prepare, evaluate, sample suggestions) and write `results/` |
 
 `next`, `suggest` and `interactive` take `--n` (order, default 4) and `--smoothing` (`add_k`, `interpolate`, `kneser_ney`).
 
@@ -94,11 +106,14 @@ $ python -m app.cli suggest "Your order"
 
 ### Results
 
-Held-out evaluation (`python -m app.cli evaluate`, 80/20 split of the 600 agent responses). Top-k is the share of
-positions where the real next word is among the model's k best guesses.
+Held-out evaluation (`python -m app.cli report`, 80/20 split of the 600 agent responses, 7,148 next-word
+predictions). Top-k is the share of positions where the real next word is among the model's k best guesses. The
+**baseline** is a unigram model (n=1): it ignores the context and always guesses the most frequent words. Full output:
+[results/evaluation.md](results/evaluation.md); example suggestions: [results/sample_suggestions.md](results/sample_suggestions.md).
 
 | n | Smoothing | Perplexity | Top-1 | Top-3 | Top-5 |
 |---|---|---:|---:|---:|---:|
+| 1 | baseline (unigram) | 113.54 | 7.8% | 17.1% | 23.8% |
 | 2 | add-k | 4.59 | 51.9% | 77.7% | 86.5% |
 | 2 | interpolation | 5.15 | 51.9% | 77.8% | 86.3% |
 | 2 | Kneser-Ney | 3.80 | 51.9% | 77.8% | 86.5% |
@@ -109,12 +124,12 @@ positions where the real next word is among the model's k best guesses.
 | 4 | interpolation | 1.54 | 84.6% | 96.2% | 98.6% |
 | 4 | **Kneser-Ney** | **1.44** | **84.9%** | **96.2%** | **98.8%** |
 
+- Every model with context beats the baseline by far: the best one (n=4, Kneser-Ney) has perplexity 1.44 instead of
+  113.5, and top-1 accuracy 84.9% instead of 7.8%.
 - Kneser-Ney has the lowest perplexity at every order, so it is the default (with n=4).
 - Add-k gets *worse* going from n=3 to n=4: with only the full-order context and no backoff, more of its contexts are
   rare, and it spreads their probability over the whole vocabulary. Interpolation and Kneser-Ney fall back on shorter
   contexts and keep improving.
-- The numbers are high because the synthetic corpus is built from a limited set of phrasings. On real tickets, expect
-  higher perplexity and lower accuracy.
 
 ### Using your own tickets
 
@@ -122,12 +137,18 @@ Put them in `corpus/raw_interactions.txt` in the same format (`### Ticket <id> |
 `Agent: ...` lines), and run `python -m app.cli prepare`. Check the prepared files before you commit them: the
 anonymizer is rule-based, so a name with no greeting or sign-off cue next to it can slip through.
 
-## Settings and secrets
+## Limitations
 
-The predictor needs no settings or keys. `app/llm.py` (an optional chat-model helper from the starter) is not used. If
-you ever use it, its settings live in `.env`, which is ignored by git. **Never commit `.env` or paste a key into code.**
-If a key ever reaches GitHub, treat it as leaked and make a new one. `CORPUS_DIR` (default `corpus`) sets where the
-CLI looks for the corpus.
+- **Synthetic data.** The corpus is generated from a limited set of phrasings, so the accuracy above is much higher
+  than it would be on real tickets. Expect higher perplexity and lower accuracy on real support conversations.
+- **Short memory.** An n-gram model only sees the last n-1 words. It cannot use the customer's message or the topic
+  of the ticket, so a continuation can drift to another topic (for example, from a refund to a password reset).
+- **Rule-based anonymization.** Emails, phones, cards, order and tracking numbers and addresses are found by pattern.
+  Names are found only next to greeting or sign-off cues, so an uncued name can slip through. Check real data by hand.
+- **Lower-case output.** Tokens are lower-cased, so proper nouns in suggestions come out lower-case
+  ("customer support"). The start of each sentence and "I" are capitalized again.
+- **Retrains on every run.** This takes well under a second for this corpus. A much larger corpus would need the
+  model to be saved to disk.
 
 ## Stretch ideas
 

@@ -6,6 +6,7 @@
     python -m app.cli interactive                     draft a response word by word
     python -m app.cli add "Your parcel is on its way."   teach the model a new response
     python -m app.cli evaluate                        compare n-gram orders and smoothing techniques
+    python -m app.cli report                          rerun everything and write results/ (one command)
 """
 import argparse
 import os
@@ -154,12 +155,57 @@ def cmd_interactive(args) -> None:
     run_interactive(model, top=args.top, corpus_dir=args.corpus, rebuild=lambda: _model(args))
 
 
+SAMPLE_PROMPTS = ["", "Hi Sarah, thank you for", "I'm sorry", "I have issued a full", "Your order",
+                  "We will send", "Please send us a photo", "To start a return,"]
+
+
+def cmd_report(args) -> None:
+    """One command to reproduce the results: prepare the corpus, evaluate every model, save sample suggestions."""
+    from pathlib import Path
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    stats = core.prepare_corpus(f"{args.corpus}/raw_interactions.txt", args.corpus)
+    sequences = core.load_sequences(args.corpus)
+    rows = core.evaluate_models(sequences, orders=(1, 2, 3, 4), seed=0)
+    names = {"add_k": "add-k", "interpolate": "interpolation", "kneser_ney": "Kneser-Ney"}
+    best = min(rows, key=lambda r: r["perplexity"])
+    lines = ["# Evaluation", "",
+             f"Corpus: {stats['interactions']} anonymized agent responses, {stats['tokens']} tokens, "
+             f"vocabulary {stats['vocabulary']}. Held-out 80/20 split (seed 0): "
+             f"{rows[0]['positions']} next-word predictions.", "",
+             "n=1 is the **baseline**: it ignores the context and always guesses the most frequent words.", "",
+             "| n | Smoothing | Perplexity | Top-1 | Top-3 | Top-5 |", "|---|---|---:|---:|---:|---:|"]
+    for r in rows:
+        label = f"{r['n']} (baseline)" if r["n"] == 1 else str(r["n"])
+        lines.append(f"| {label} | {names[r['smoothing']]} | {r['perplexity']:.2f} | {r['top1']:.1%} "
+                     f"| {r['top3']:.1%} | {r['top5']:.1%} |")
+    base = min((r for r in rows if r["n"] == 1), key=lambda r: r["perplexity"])
+    lines += ["", f"Best: n={best['n']} with {names[best['smoothing']]} smoothing: perplexity "
+              f"{best['perplexity']:.2f} vs {base['perplexity']:.2f} for the baseline, top-1 accuracy "
+              f"{best['top1']:.1%} vs {base['top1']:.1%}.", ""]
+    (out / "evaluation.md").write_text("\n".join(lines))
+
+    model = core.build_model(args.corpus)
+    sample = ["# Sample suggestions", "", "Model: n=4, Kneser-Ney smoothing. Produced by `python -m app.cli report`.", ""]
+    for prompt in SAMPLE_PROMPTS:
+        words = core.suggest_next_words(model, prompt, top_n=5)
+        sample.append(f"## \"{prompt}\"" if prompt else "## (empty: start of a response)")
+        sample.append("")
+        sample.append("Next words: " + ", ".join(f"`{w}` {p:.0%}" for w, p in words))
+        sample.append("")
+        for i, (tokens, _) in enumerate(core.suggest_continuations(model, prompt, n=3), 1):
+            sample.append(f"{i}. {core.complete(prompt, tokens) if prompt else core.detokenize(tokens)}")
+        sample.append("")
+    (out / "sample_suggestions.md").write_text("\n".join(sample))
+    print("\n".join(lines))
+    print(f"Wrote {out}/evaluation.md and {out}/sample_suggestions.md")
+
+
 # --- argument parsing
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="support-response-generator", description="Customer support agents use this CLI tool to quickly draft responses to common queries by generating next-word suggestions based on a corpus of past support interactions.")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("hello", help="check that everything is wired up")
 
     def model_options(p):
         p.add_argument("--n", type=int, default=4, help="n-gram order (default 4)")
@@ -201,14 +247,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--corpus", default=CORPUS_DIR, help="folder with the prepared corpus")
     p.set_defaults(func=cmd_evaluate)
+
+    p = sub.add_parser("report", help="rerun everything: prepare, evaluate against the baseline, save results/")
+    p.add_argument("--corpus", default=CORPUS_DIR, help="folder with raw_interactions.txt")
+    p.add_argument("--out", default="results", help="folder for the result files")
+    p.set_defaults(func=cmd_report)
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    if args.command == "hello":
-        print("Support Response Generator is ready. Open README.md for your milestones.")
-        return
     args.func(args)
 
 
